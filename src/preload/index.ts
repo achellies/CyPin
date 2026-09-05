@@ -16,7 +16,7 @@ const api: Api = {
   listActivities: (filter?: unknown) => ipcRenderer.invoke('activities:list', filter),
   getActivityDetail: (id: string) => ipcRenderer.invoke('activity:detail', id),
 
-  getDashboard: () => ipcRenderer.invoke('dashboard:get'),
+  getDashboard: (range?: string) => ipcRenderer.invoke('dashboard:get', range),
   getTrends: () => ipcRenderer.invoke('trends:get'),
   getAbility: () => ipcRenderer.invoke('ability:get'),
   getAdvice: () => ipcRenderer.invoke('advice:get'),

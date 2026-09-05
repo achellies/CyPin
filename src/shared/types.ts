@@ -87,22 +87,29 @@ export interface HrZones {
   labels: string[]
 }
 
+/** 仪表盘统计范围（周/月/季为自然周期，半年/年为滚动窗口） */
+export type DashRange = 'week' | 'month' | 'quarter' | 'half' | 'year'
+
 export interface DashboardData {
+  /** 所选范围内的汇总统计（全部随范围选择器联动） */
   summary: {
-    weekDistance: number
-    weekTime: number
-    weekElevation: number
-    weekCount: number
-    monthDistance: number
-    monthTime: number
-    ytdDistance: number
-    avgSpeed7d: number
-    avgHr7d: number | null
-    avgCadence7d: number | null
+    distance: number
+    time: number
+    elevation: number
+    count: number
+    /** 时长加权平均速度 m/s */
+    avgSpeed: number
+    avgHr: number | null
+    avgCadence: number | null
+    tss: number
   }
+  /** 年度累计距离（固定指标，不随范围选择变化） */
+  ytdDistance: number
   load: LoadPoint[]
   zoneDistribution: { label: string; seconds: number }[]
   zoneKind: 'power' | 'hr'
+  /** 所选范围内心率区间分布（与功率区间并列输出，仅当有心率数据时提供） */
+  hrZoneDistribution?: { label: string; seconds: number }[]
   /** 部分区间时间为平均心率估算（缺逐秒数据） */
   zoneEstimated?: boolean
   /** 尚未同步详细数据（streams）的活动数 */

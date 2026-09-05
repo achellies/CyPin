@@ -4,6 +4,7 @@ import type {
   ActivityDetailData,
   AppSettings,
   DashboardData,
+  DashRange,
   AdviceItem,
   TrendsData
 } from './types'
@@ -44,7 +45,7 @@ export interface Api {
     search?: string
   }): Promise<ActivityRow[]>
   getActivityDetail(id: string): Promise<ActivityDetailData | null>
-  getDashboard(): Promise<DashboardData>
+  getDashboard(range?: DashRange): Promise<DashboardData>
   getTrends(): Promise<TrendsData>
   getAbility(): Promise<AbilityData>
   getAdvice(): Promise<AdviceItem[]>

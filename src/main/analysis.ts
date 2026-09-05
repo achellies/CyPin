@@ -4,6 +4,7 @@ import type {
   Activity,
   CourseType,
   DashboardData,
+  DashRange,
   LoadPoint,
   PowerCurve,
   RideCourse,
@@ -26,6 +27,24 @@ const POWER_ZONE_LABELS = ['Z1 恢复', 'Z2 耐力', 'Z3 节奏', 'Z4 阈值', '
 const HR_ZONE_LABELS = ['Z1 恢复', 'Z2 耐力', 'Z3 节奏', 'Z4 阈值', 'Z5 极限']
 /** hrTSS 每小时系数（Z1-Z5） */
 const HR_TSS_PER_HOUR = [35, 55, 75, 90, 105]
+
+/** 仪表盘统计范围的起点时间戳：周/月/季为自然周期起点，半年/年为滚动窗口 */
+function rangeStartTs(range: DashRange): number {
+  const now = new Date()
+  if (range === 'week') {
+    const d = new Date(now)
+    d.setDate(d.getDate() - ((d.getDay() + 6) % 7))
+    d.setHours(0, 0, 0, 0)
+    return d.getTime()
+  }
+  if (range === 'month') return new Date(now.getFullYear(), now.getMonth(), 1).getTime()
+  if (range === 'quarter') return new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1).getTime()
+  if (range === 'half') return now.getTime() - 182 * 86400_000
+  return now.getTime() - 365 * 86400_000
+}
+
+/** 各范围对应的负荷图天数（CTL 是 42 天指数加权，短于 28 天的曲线无意义，week 显示 28 天） */
+const RANGE_LOAD_DAYS: Record<DashRange, number> = { week: 28, month: 31, quarter: 92, half: 182, year: 365 }
 
 const POWER_CURVE_WINDOWS = [
   { seconds: 1, label: '1s' },
@@ -58,9 +77,8 @@ interface CachedMetrics {
   [id: string]: { ftp: number; tss: number; method: string; np?: number }
 }
 
-/** 页面级结果缓存：数据版本号或 FTP 变化时自动失效 */
-const CACHED_PAGES = ['dashboard', 'trends', 'ability'] as const
-type CachedPage = (typeof CACHED_PAGES)[number]
+/** 页面级结果缓存：数据版本号或 FTP 变化时自动失效；键支持动态参数（如 dashboard:quarter） */
+type CachedPage = string
 
 const dayStr = (iso: string) => iso.slice(0, 10)
 
@@ -625,37 +643,38 @@ export class AnalysisEngine {
   }
 
   // ---------- 聚合视图 ----------
-  getDashboard(): DashboardData {
-    return this.cached('dashboard', () => this.computeDashboard())
+  getDashboard(range: DashRange = 'quarter'): DashboardData {
+    return this.cached(`dashboard:${range}`, () => this.computeDashboard(range))
   }
 
-  private computeDashboard(): DashboardData {
+  private computeDashboard(range: DashRange): DashboardData {
     const all = this.store.listActivities()
     const ftp = this.store.getFtp()
-    const now = Date.now()
-    const inRange = (a: Activity, days: number) => now - new Date(a.startDate).getTime() <= days * 86400_000
-    const week = all.filter((a) => inRange(a, 7))
-    const month = all.filter((a) => inRange(a, 30))
-    const ytd = all.filter((a) => a.startDate.slice(0, 4) === new Date().toISOString().slice(0, 4))
+    const startTs = rangeStartTs(range)
+    // 所选范围（自然周/月/季起点或滚动窗口），1970 脏时间戳天然被 startTs 过滤
+    const inRange = (a: Activity) => plausibleDate(a.startDate) && new Date(a.startDate).getTime() >= startTs
+    const scope = all.filter(inRange)
 
-    const load = this.loadSeries(90)
-    // 近 4 周区间分布：功率 streams > 心率 streams > 平均心率估算
+    const load = this.loadSeries(RANGE_LOAD_DAYS[range])
+    // 所选范围区间分布：功率与心率并列统计（同一批活动两种视角）
     const hrZoneSec = new Array(5).fill(0)
     const powerZoneSec = new Array(7).fill(0)
     let estimatedSec = 0
-    for (const a of all.filter((x) => inRange(x, 28))) {
+    for (const a of scope) {
+      // 功率与心率并列统计（同一批活动两种视角），不再互斥跳过
+      let usedPower = false
       if (ftp && a.deviceWatts) {
         const pz = this.powerZoneSecondsCached(a, ftp)
         if (pz) {
           pz.forEach((v, i) => (powerZoneSec[i] += v))
-          continue
+          usedPower = true
         }
       }
       const hz = this.hrZoneSecondsCached(a)
       if (hz) {
         hz.forEach((v, i) => (hrZoneSec[i] += v))
-      } else if (a.averageHeartrate && a.averageHeartrate > 60 && a.movingTime > 0) {
-        // 无逐秒数据：把整段移动时间计入平均心率所在区间（估算）
+      } else if (!usedPower && a.averageHeartrate && a.averageHeartrate > 60 && a.movingTime > 0) {
+        // 无逐秒数据且无功率：把整段移动时间计入平均心率所在区间（估算）
         hrZoneSec[this.hrZoneIndex(a.averageHeartrate)] += a.movingTime
         estimatedSec += a.movingTime
       }
@@ -666,6 +685,9 @@ export class AnalysisEngine {
       ? POWER_ZONE_LABELS.map((label, i) => ({ label, seconds: powerZoneSec[i] }))
       : HR_ZONE_LABELS.map((label, i) => ({ label, seconds: hrZoneSec[i] }))
     const zoneEstimated = !usePowerZones && estimatedSec > 0 && estimatedSec > hrZoneSec.reduce((s2, v) => s2 + v, 0) * 0.3
+    // 心率区间并列输出：即使功率区间可用也提供（仪表盘双卡展示）
+    const hrTotal = hrZoneSec.reduce((s2, v) => s2 + v, 0)
+    const hrZoneDistribution = hrTotal > 1800 ? HR_ZONE_LABELS.map((label, i) => ({ label, seconds: hrZoneSec[i] })) : undefined
 
     const best = this.globalPowerBest()
     const bestPower = [60, 300, 1200]
@@ -675,9 +697,9 @@ export class AnalysisEngine {
     // 尚未同步详细数据的 Strava 活动数
     const missingStreams = all.filter((a) => a.source === 'strava' && !this.store.hasStreams(a.id)).length
 
-    // 近 7 天平均心率 / 踏频（按骑行时长加权，过滤明显无效值）
-    const hrSamples = week.filter((a) => a.averageHeartrate && a.averageHeartrate > 60 && a.movingTime > 300)
-    const cadSamples = week.filter((a) => a.averageCadence && a.averageCadence > 30 && a.movingTime > 300)
+    // 所选范围平均心率 / 踏频（按骑行时长加权，过滤明显无效值）
+    const hrSamples = scope.filter((a) => a.averageHeartrate && a.averageHeartrate > 60 && a.movingTime > 300)
+    const cadSamples = scope.filter((a) => a.averageCadence && a.averageCadence > 30 && a.movingTime > 300)
     const weighted = (arr: Activity[], pick: (a: Activity) => number) => {
       const t = sum(arr.map((a) => a.movingTime))
       return t > 0 ? sum(arr.map((a) => pick(a) * a.movingTime)) / t : null
@@ -685,20 +707,20 @@ export class AnalysisEngine {
 
     return {
       summary: {
-        weekDistance: sum(week.map((a) => a.distance)),
-        weekTime: sum(week.map((a) => a.movingTime)),
-        weekElevation: sum(week.map((a) => a.totalElevationGain)),
-        weekCount: week.length,
-        monthDistance: sum(month.map((a) => a.distance)),
-        monthTime: sum(month.map((a) => a.movingTime)),
-        ytdDistance: sum(ytd.map((a) => a.distance)),
-        avgSpeed7d: week.length ? sum(week.map((a) => a.averageSpeed)) / week.length : 0,
-        avgHr7d: hrSamples.length ? Math.round(weighted(hrSamples, (a) => a.averageHeartrate!) ?? 0) || null : null,
-        avgCadence7d: cadSamples.length ? Math.round((weighted(cadSamples, (a) => a.averageCadence!) ?? 0) * 10) / 10 || null : null
+        distance: sum(scope.map((a) => a.distance)),
+        time: sum(scope.map((a) => a.movingTime)),
+        elevation: sum(scope.map((a) => a.totalElevationGain)),
+        count: scope.length,
+        avgSpeed: scope.length ? weighted(scope, (a) => a.averageSpeed) ?? 0 : 0,
+        avgHr: hrSamples.length ? Math.round(weighted(hrSamples, (a) => a.averageHeartrate!) ?? 0) || null : null,
+        avgCadence: cadSamples.length ? Math.round((weighted(cadSamples, (a) => a.averageCadence!) ?? 0) * 10) / 10 || null : null,
+        tss: Math.round(sum(scope.map((a) => this.activityTss(a, ftp).tss)))
       },
+      ytdDistance: sum(all.filter((a) => plausibleDate(a.startDate) && a.startDate.slice(0, 4) === new Date().toISOString().slice(0, 4)).map((a) => a.distance)),
       load,
       zoneDistribution,
       zoneKind: usePowerZones ? 'power' : 'hr',
+      hrZoneDistribution,
       zoneEstimated,
       missingStreams,
       recent: all.slice(0, 8).map((a) => ({ ...a, tss: Math.round(this.activityTss(a, ftp).tss) })),

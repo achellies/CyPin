@@ -6,7 +6,7 @@ import { SyncService } from './sync'
 import { AnalysisEngine } from './analysis'
 import { AdviceEngine } from './advice'
 import { importFiles } from './import'
-import type { AppSettings, SyncProgress } from '../shared/types'
+import type { AppSettings, DashRange, SyncProgress } from '../shared/types'
 
 let store: Store
 let strava: StravaClient
@@ -176,7 +176,7 @@ function registerIpc() {
     return { ok: true }
   })
 
-  ipcMain.handle('dashboard:get', () => analysis.getDashboard())
+  ipcMain.handle('dashboard:get', (_e, range?: DashRange) => analysis.getDashboard(range ?? 'quarter'))
   ipcMain.handle('trends:get', () => analysis.getTrends())
   ipcMain.handle('ability:get', () => analysis.getAbility())
   ipcMain.handle('advice:get', () => advice.getAdvice())

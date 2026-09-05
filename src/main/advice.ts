@@ -155,8 +155,8 @@ export class AdviceEngine {
       }
     }
 
-    // --- 3. 强度分布（近 4 周，80/20 极化） ---
-    const dash = this.analysis.getDashboard()
+    // --- 3. 强度分布（近一季，80/20 极化） ---
+    const dash = this.analysis.getDashboard('quarter')
     const zone = dash.zoneDistribution
     const totalZoneSec = zone.reduce((s, z) => s + z.seconds, 0)
     if (totalZoneSec > 3600) {

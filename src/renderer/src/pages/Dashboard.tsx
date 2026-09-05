@@ -1,9 +1,27 @@
 import { useEffect, useState } from 'react'
-import type { DashboardData } from '@shared/types'
+import type { DashboardData, DashRange } from '@shared/types'
 import { Chart } from '../components/Chart'
 import { StatCard } from '../components/StatCard'
 import { km, duration, kmh, datetime, TYPE_LABELS } from '../lib/format'
 import type { EChartsOption } from 'echarts'
+
+/** 统计范围选项：全仪表盘联动（周/月/季为自然周期，半年/年为滚动窗口） */
+const RANGES: { key: DashRange; label: string }[] = [
+  { key: 'week', label: '本周' },
+  { key: 'month', label: '本月' },
+  { key: 'quarter', label: '本季度' },
+  { key: 'half', label: '半年' },
+  { key: 'year', label: '一年' }
+]
+
+/** 各范围对应的负荷图展示天数文案 */
+const RANGE_LOAD_DAYS_LABEL: Record<DashRange, string> = {
+  week: '28 天',
+  month: '31 天',
+  quarter: '一个季度',
+  half: '半年',
+  year: '一年'
+}
 
 export function Dashboard({
   version,
@@ -15,14 +33,15 @@ export function Dashboard({
   onGoSettings: () => void
 }) {
   const [data, setData] = useState<DashboardData | null>(null)
+  const [range, setRange] = useState<DashRange>('quarter')
   const [syncing, setSyncing] = useState(false)
   const [syncMsg, setSyncMsg] = useState('')
 
-  const reload = () => window.api.getDashboard().then(setData)
+  const reload = () => window.api.getDashboard(range).then(setData)
 
   useEffect(() => {
     reload()
-  }, [version])
+  }, [version, range])
 
   useEffect(() => {
     return window.api.onSyncProgress((p) => {
@@ -88,24 +107,30 @@ export function Dashboard({
     ]
   }
 
-  const zoneOption: EChartsOption = {
+  // 横向区间条形图（功率区间单色 / 心率区间 5 色分段）
+  const HR_ZONE_COLORS = ['#4d9fff', '#4caf7d', '#f0b429', '#e5484d', '#a855f7']
+  const zoneOptionOf = (dist: { label: string; seconds: number }[], colors: string[]): EChartsOption => ({
     tooltip: { formatter: (p: any) => `${p.name}: ${(p.value / 3600).toFixed(1)} 小时` },
-    grid: { left: 80, right: 24, top: 8, bottom: 24 },
+    grid: { left: 80, right: 46, top: 8, bottom: 24 },
     xAxis: { type: 'value', axisLabel: { color: '#9aa4b0', formatter: (v: number) => `${Math.round(v / 3600)}h` }, splitLine: { lineStyle: { color: '#222932' } } },
-    yAxis: { type: 'category', data: data.zoneDistribution.map((z) => z.label).reverse(), axisLabel: { color: '#9aa4b0' } },
+    yAxis: { type: 'category', data: dist.map((z) => z.label).reverse(), axisLabel: { color: '#9aa4b0' } },
     series: [
       {
         type: 'bar',
-        data: data.zoneDistribution.map((z) => z.seconds).reverse(),
+        data: dist.map((z, i) => ({ value: z.seconds, itemStyle: { color: colors[colors.length - dist.length + i] ?? colors[0] } })).reverse(),
         barWidth: 16,
-        itemStyle: { color: '#fc4c02', borderRadius: [0, 4, 4, 0] },
+        itemStyle: { borderRadius: [0, 4, 4, 0] },
         label: { show: true, position: 'right', color: '#9aa4b0', formatter: (p: any) => `${(p.value / 3600).toFixed(1)}h` }
       }
     ]
-  }
+  })
+
+  const zoneOption = zoneOptionOf(data.zoneDistribution, ['#fc4c02'])
+  const hrZoneOption = data.hrZoneDistribution ? zoneOptionOf(data.hrZoneDistribution, HR_ZONE_COLORS) : null
 
   const tsb = data.load[data.load.length - 1]
   const zoneTotalSec = data.zoneDistribution.reduce((s, z) => s + z.seconds, 0)
+  const rangeLabel = RANGES.find((r) => r.key === range)?.label ?? ''
 
   return (
     <>
@@ -116,6 +141,13 @@ export function Dashboard({
             {tsb ? `当前状态 TSB ${tsb.tsb}（CTL ${tsb.ctl} / ATL ${tsb.atl}）` : ''}{' '}
             {data.ftp ? `· FTP ${data.ftp}W${data.weightKg ? `（${(data.ftp / data.weightKg).toFixed(2)} W/kg）` : ''}` : ''}
           </p>
+        </div>
+        <div className="seg" role="tablist">
+          {RANGES.map((r) => (
+            <button key={r.key} className={range === r.key ? 'seg-btn active' : 'seg-btn'} onClick={() => setRange(r.key)}>
+              {r.label}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -136,21 +168,22 @@ export function Dashboard({
       )}
 
       <div className="stat-grid">
-        <StatCard label="本周距离" value={km(data.summary.weekDistance)} sub={`${data.summary.weekCount} 次骑行`} accent />
-        <StatCard label="本周时长" value={duration(data.summary.weekTime)} />
-        <StatCard label="本周爬升" value={Math.round(data.summary.weekElevation) + ' m'} />
-        <StatCard label="7 日均速" value={kmh(data.summary.avgSpeed7d)} />
-        <StatCard label="7 日平均心率" value={data.summary.avgHr7d ? Math.round(data.summary.avgHr7d) + ' bpm' : '—'} sub={data.summary.avgHr7d ? '按时长加权' : '近 7 天无心率数据'} />
-        <StatCard label="7 日平均踏频" value={data.summary.avgCadence7d ? data.summary.avgCadence7d + ' rpm' : '—'} sub={data.summary.avgCadence7d ? '按时长加权' : '近 7 天无踏频数据'} />
-        <StatCard label="月度距离" value={km(data.summary.monthDistance)} />
-        <StatCard label="年度累计" value={km(data.summary.ytdDistance)} />
+        <StatCard label={`${rangeLabel}距离`} value={km(data.summary.distance)} sub={`${data.summary.count} 次骑行`} accent />
+        <StatCard label={`${rangeLabel}时长`} value={duration(data.summary.time)} />
+        <StatCard label={`${rangeLabel}爬升`} value={Math.round(data.summary.elevation) + ' m'} />
+        <StatCard label={`${rangeLabel}训练负荷`} value={data.summary.tss > 0 ? String(data.summary.tss) : '—'} sub="TSS 合计" />
+        <StatCard label={`${rangeLabel}均速`} value={kmh(data.summary.avgSpeed)} sub="按时长加权" />
+        <StatCard label={`${rangeLabel}平均心率`} value={data.summary.avgHr ? Math.round(data.summary.avgHr) + ' bpm' : '—'} sub={data.summary.avgHr ? '按时长加权' : `${rangeLabel}无心率数据`} />
+        <StatCard label={`${rangeLabel}平均踏频`} value={data.summary.avgCadence ? data.summary.avgCadence + ' rpm' : '—'} sub={data.summary.avgCadence ? '按时长加权' : `${rangeLabel}无踏频数据`} />
+        <StatCard label="年度累计" value={km(data.ytdDistance ?? 0)} sub="全范围固定指标" />
       </div>
 
       <div className="card">
-        <h3>训练负荷（近 90 天）</h3>
+        <h3>训练负荷（{range === 'week' ? '近 28 天' : `近 ${RANGE_LOAD_DAYS_LABEL[range]}`}）</h3>
         <Chart option={loadOption} height={280} />
         <div className="hint">
           CTL＝42 天指数加权日 TSS，代表长期有氧基础；ATL＝7 天，代表近期疲劳；TSB＝CTL−ATL，低于 −30 提示疲劳过度，高于 +10 表示状态峰值。
+          {range === 'week' && ' 本周范围较短，负荷图固定显示 28 天。'}
         </div>
       </div>
 
@@ -189,7 +222,7 @@ export function Dashboard({
         <div>
           <div className="card">
             <h3>
-              强度分布（近 4 周 · {data.zoneKind === 'power' ? '功率区间' : '心率区间'}
+              强度分布（近 {rangeLabel} · {data.zoneKind === 'power' ? '功率区间' : '心率区间'}
               {data.zoneEstimated ? ' · 含估算' : ''}）
             </h3>
             {zoneTotalSec > 0 ? (
@@ -203,10 +236,17 @@ export function Dashboard({
               </>
             ) : (
               <div className="hint" style={{ padding: '30px 0', textAlign: 'center' }}>
-                近 4 周没有可统计的心率/功率数据。同步详细数据或骑行时佩戴心率设备后，这里会展示各强度区间的时长分布。
+                所选范围内没有可统计的心率/功率数据。同步详细数据或骑行时佩戴心率设备后，这里会展示各强度区间的时长分布。
               </div>
             )}
           </div>
+          {data.zoneKind === 'power' && data.hrZoneDistribution && hrZoneOption && (
+            <div className="card">
+              <h3>心率区间分布（{rangeLabel}）</h3>
+              <Chart option={hrZoneOption} height={200} />
+              <div className="hint">按乳酸阈心率分 5 档，与功率区间互为补充：有氧刺激主要看 Z1-Z2（蓝+绿）的量，Z4+（红+紫）是阈值以上刺激。</div>
+            </div>
+          )}
           <div className="stat-grid" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}>
             {data.bestPower.map((p) => (
               <StatCard

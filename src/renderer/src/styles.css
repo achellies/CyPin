@@ -663,6 +663,37 @@ label.field span {
   line-height: 1.7;
 }
 
+/* 统计范围分段选择器（仪表盘页头右侧） */
+.seg {
+  display: inline-flex;
+  gap: 2px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 3px;
+  height: fit-content;
+}
+
+.seg-btn {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.seg-btn:hover {
+  color: var(--text);
+}
+
+.seg-btn.active {
+  background: var(--accent, #fc4c02);
+  color: #fff;
+}
+
 /* 专业术语白话解释（虚线下划线 + hover/聚焦弹出气泡，portal 渲染到 body） */
 .term-tip {
   cursor: help;
