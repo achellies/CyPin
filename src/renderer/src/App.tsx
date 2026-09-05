@@ -7,6 +7,7 @@ import { Analysis } from './pages/Analysis'
 import { Advice } from './pages/Advice'
 import { Workouts } from './pages/Workouts'
 import { SettingsPage } from './pages/Settings'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { StravaStatus } from '@shared/api'
 
 type Page = 'dashboard' | 'activities' | 'detail' | 'trends' | 'ability' | 'workouts' | 'advice' | 'settings'
@@ -68,14 +69,16 @@ export default function App() {
         </div>
       </aside>
       <main className="content">
-        {page === 'dashboard' && <Dashboard version={version} onOpenDetail={openDetail} onGoSettings={() => setPage('settings')} />}
-        {page === 'activities' && <Activities version={version} onOpenDetail={openDetail} />}
-        {page === 'detail' && detailId && <Detail id={detailId} onBack={() => setPage('activities')} />}
-        {page === 'trends' && <Trends version={version} />}
-        {page === 'ability' && <Analysis version={version} onOpenDetail={openDetail} />}
-        {page === 'workouts' && <Workouts />}
-        {page === 'advice' && <Advice version={version} />}
-        {page === 'settings' && <SettingsPage onChanged={reload} />}
+        <ErrorBoundary key={page}>
+          {page === 'dashboard' && <Dashboard version={version} onOpenDetail={openDetail} onGoSettings={() => setPage('settings')} />}
+          {page === 'activities' && <Activities version={version} onOpenDetail={openDetail} />}
+          {page === 'detail' && detailId && <Detail id={detailId} onBack={() => setPage('activities')} />}
+          {page === 'trends' && <Trends version={version} />}
+          {page === 'ability' && <Analysis version={version} onOpenDetail={openDetail} />}
+          {page === 'workouts' && <Workouts />}
+          {page === 'advice' && <Advice version={version} />}
+          {page === 'settings' && <SettingsPage onChanged={reload} />}
+        </ErrorBoundary>
       </main>
     </div>
   )

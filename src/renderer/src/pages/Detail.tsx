@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import type { ActivityDetailData, AppSettings } from '@shared/types'
 import { Chart } from '../components/Chart'
 import { MapView } from '../components/MapView'
@@ -33,7 +35,8 @@ const TERM_EXPLAIN: Record<string, string> = {
   TSS: '训练负荷分数：1 小时全力骑 ≈ 100 分。用于量化每天练了多少、需要多久恢复',
   '前 7 天 TSS': '本次骑行前 7 天的累计训练负荷，超过 500 属于短期高负荷',
   '心率-功率解耦': '后半程心率相对前半程升高的幅度（%）。越低 = 有氧耐力越稳；大于 8% 说明耐力或补给有短板',
-  'NP 功体比': 'NP ÷ 体重（W/kg），衡量爬坡与巡航能力的关键数字'
+  'NP 功体比': 'NP ÷ 体重（W/kg），衡量爬坡与巡航能力的关键数字',
+  心率区间: '按乳酸阈心率百分比分 5 档：Z1<68%、Z2 68-83%、Z3 83-94%、Z4 94-105%、Z5>105%。有氧基础主要靠 Z1-Z2 积累，Z4+ 提升阈值能力'
 }
 
 function termExplain(label: string): string | undefined {
@@ -48,10 +51,43 @@ function termExplain(label: string): string | undefined {
   return undefined
 }
 
-/** 有白话解释的术语：加虚线下划线 + title hover */
-function termProps(label: string): { title?: string; className?: string } {
-  const e = termExplain(label)
-  return e ? { title: e, className: 'term-tip' } : {}
+/** 有白话解释的术语：虚线下划线，hover/聚焦弹出白话解释（原生 title 在部分环境下不显示，改用自绘气泡） */
+export function Term({ label, children }: { label: string; children?: ReactNode }) {
+  const [tip, setTip] = useState<{ x: number; y: number; above: boolean } | null>(null)
+  const explain = termExplain(label)
+  if (!explain) return <>{children ?? label}</>
+  const show = (el: HTMLElement) => {
+    const r = el.getBoundingClientRect()
+    const above = r.top > 130
+    setTip({ x: r.left, y: above ? r.top - 8 : r.bottom + 8, above })
+  }
+  return (
+    <span
+      className="term-tip"
+      tabIndex={0}
+      onMouseEnter={(ev) => show(ev.currentTarget)}
+      onMouseLeave={() => setTip(null)}
+      onFocus={(ev) => show(ev.currentTarget)}
+      onBlur={() => setTip(null)}
+    >
+      {children ?? label}
+      {tip &&
+        createPortal(
+          <div
+            className="term-pop"
+            style={{
+              left: Math.min(tip.x, window.innerWidth - 320),
+              top: tip.y,
+              transform: tip.above ? 'translateY(-100%)' : undefined
+            }}
+          >
+            <b>{label}</b>
+            <span>{explain}</span>
+          </div>,
+          document.body
+        )}
+    </span>
+  )
 }
 
 function scoreColor(v: number): string {
@@ -82,56 +118,53 @@ export function Detail({ id, onBack }: { id: string; onBack: () => void }) {
 
   const xData = streams ? streams.time.map((t) => timeLabel(t)) : []
 
-  const gridDef = (top: number) => ({ left: 54, right: 54, top, height: 90 })
-  const seriesOf = (arr: number[] | undefined, name: string, color: string, top: number, unit: string) =>
-    arr && arr.some((v) => v > 0)
-      ? {
-          grid: gridDef(top),
-          yAxis: [{ type: 'value', name: unit, nameTextStyle: { color: '#9aa4b0' }, axisLabel: { color: '#9aa4b0' }, splitLine: { lineStyle: { color: '#222932' } }, gridIndex: (top - 20) / 122 }],
-          series: [
-            {
-              name,
-              type: 'line' as const,
-              xAxisIndex: (top - 20) / 122,
-              yAxisIndex: (top - 20) / 122,
-              data: arr,
-              showSymbol: false,
-              lineStyle: { width: 1.2, color },
-              sampling: 'lttb' as const
-            }
-          ]
-        }
-      : null
+  // 4 个数据网格布局：速度 / 心率 / 功率 / 海拔。
+  // 关键：grid/xAxis/yAxis/series 的 index 必须按「过滤后」的顺序统一分配，
+  // 否则缺某段流的活动（如骑行台无海拔）会出现 gridIndex 错位 → ECharts 崩溃 → 整页白屏
+  const activeSections = [
+    { arr: streams?.velocitySmooth, name: '速度', color: '#4d9fff', unit: 'm/s' },
+    { arr: streams?.heartrate, name: '心率', color: '#e5484d', unit: 'bpm' },
+    { arr: streams?.watts, name: '功率', color: '#fc4c02', unit: 'W' },
+    { arr: streams?.altitude, name: '海拔', color: '#4caf7d', unit: 'm' }
+  ].filter((d): d is { arr: number[]; name: string; color: string; unit: string } => !!d.arr && d.arr.some((v) => v > 0))
 
-  // 4 个数据网格布局：速度 / 心率 / 功率 / 海拔
-  const sections = [
-    seriesOf(streams?.velocitySmooth, '速度', '#4d9fff', 20, 'm/s'),
-    seriesOf(streams?.heartrate, '心率', '#e5484d', 142, 'bpm'),
-    seriesOf(streams?.watts, '功率', '#fc4c02', 264, 'W'),
-    seriesOf(streams?.altitude, '海拔', '#4caf7d', 386, 'm')
-  ].filter(Boolean) as NonNullable<ReturnType<typeof seriesOf>>[]
-
-  const hasStreams = !!streams && streams.time.length > 0
+  const hasStreams = !!streams && streams.time.length > 0 && activeSections.length > 0
   const detailOption: EChartsOption | null = hasStreams
     ? ({
         tooltip: { trigger: 'axis', axisPointer: { type: 'line' } },
         axisPointer: { link: [{ xAxisIndex: 'all' }] },
-        grid: sections.map((s) => s.grid),
-        xAxis: sections.map((s, i) => ({
+        grid: activeSections.map((_, i) => ({ left: 54, right: 54, top: 20 + i * 122, height: 90 })),
+        xAxis: activeSections.map((_, i) => ({
           type: 'category' as const,
           data: xData,
           gridIndex: i,
           boundaryGap: false,
-          axisLabel: { color: '#9aa4b0', show: i === sections.length - 1 },
-          axisTick: { show: i === sections.length - 1 }
+          axisLabel: { color: '#9aa4b0', show: i === activeSections.length - 1 },
+          axisTick: { show: i === activeSections.length - 1 }
         })),
-        yAxis: sections.flatMap((s) => s.yAxis),
+        yAxis: activeSections.map((d, i) => ({
+          type: 'value' as const,
+          name: d.unit,
+          nameTextStyle: { color: '#9aa4b0' },
+          axisLabel: { color: '#9aa4b0' },
+          splitLine: { lineStyle: { color: '#222932' } },
+          gridIndex: i
+        })),
         dataZoom: [
-          { type: 'inside', xAxisIndex: sections.map((_, i) => i) },
-          { type: 'slider', xAxisIndex: sections.map((_, i) => i), bottom: 0, height: 22 }
+          { type: 'inside', xAxisIndex: activeSections.map((_, i) => i) },
+          { type: 'slider', xAxisIndex: activeSections.map((_, i) => i), bottom: 0, height: 22 }
         ],
-        series: sections.flatMap((s) => s.series),
-        legend: { data: sections.map((s) => s.series[0].name), top: 0, textStyle: { color: '#9aa4b0' } }
+        series: activeSections.map((d, i) => ({
+          name: d.name,
+          type: 'line' as const,
+          xAxisIndex: i,
+          yAxisIndex: i,
+          data: d.arr,
+          showSymbol: false,
+          lineStyle: { width: 1.2, color: d.color },
+          sampling: 'lttb' as const
+        })),
+        legend: { data: activeSections.map((d) => d.name), top: 0, textStyle: { color: '#9aa4b0' } }
       } as unknown as EChartsOption)
     : null
 
@@ -154,23 +187,26 @@ export function Detail({ id, onBack }: { id: string; onBack: () => void }) {
       }
     : null
 
-  const zoneOption: EChartsOption | null =
-    data.timeInZones.length > 0
-      ? {
-          tooltip: { formatter: (p: any) => `${p.name}: ${Math.round(p.value / 60)} min` },
-          grid: { left: 80, right: 24, top: 8, bottom: 24 },
-          xAxis: { type: 'value', axisLabel: { color: '#9aa4b0', formatter: (v: number) => `${Math.round(v / 60)}m` }, splitLine: { lineStyle: { color: '#222932' } } },
-          yAxis: { type: 'category', data: data.timeInZones.map((z) => z.label).reverse(), axisLabel: { color: '#9aa4b0' } },
-          series: [
-            {
-              type: 'bar',
-              data: data.timeInZones.map((z) => z.seconds).reverse(),
-              barWidth: 14,
-              itemStyle: { color: '#4d9fff', borderRadius: [0, 4, 4, 0] }
-            }
-          ]
-        }
-      : null
+  // 功率区间 / 心率区间并列展示（有哪种就给哪种）
+  const POWER_ZONE_COLORS = ['#5b8def', '#4d9fff', '#4caf7d', '#f0b429', '#e5484d', '#ff6b9d', '#a855f7']
+  const HR_ZONE_COLORS = ['#4d9fff', '#4caf7d', '#f0b429', '#e5484d', '#a855f7']
+  const zoneBarOption = (zones: { label: string; seconds: number }[], colors: string[]): EChartsOption => ({
+    tooltip: { formatter: (p: any) => `${p.name}: ${Math.round(p.value / 60)} min` },
+    grid: { left: 80, right: 24, top: 8, bottom: 24 },
+    xAxis: { type: 'value', axisLabel: { color: '#9aa4b0', formatter: (v: number) => `${Math.round(v / 60)}m` }, splitLine: { lineStyle: { color: '#222932' } } },
+    yAxis: { type: 'category', data: zones.map((z) => z.label).reverse(), axisLabel: { color: '#9aa4b0' } },
+    series: [
+      {
+        type: 'bar',
+        data: zones.map((z, i) => ({ value: z.seconds, itemStyle: { color: colors[colors.length - zones.length + i] ?? colors[0], borderRadius: [0, 4, 4, 0] } })).reverse(),
+        barWidth: 14
+      }
+    ]
+  })
+  const powerZones = data.timeInZones.filter((z) => z.power)
+  const hrZones = data.timeInZones.filter((z) => z.hr)
+  const powerZoneOption = powerZones.length > 0 ? zoneBarOption(powerZones, POWER_ZONE_COLORS) : null
+  const hrZoneOption = hrZones.length > 0 ? zoneBarOption(hrZones, HR_ZONE_COLORS) : null
 
   return (
     <>
@@ -187,7 +223,7 @@ export function Detail({ id, onBack }: { id: string; onBack: () => void }) {
             {data.decoupling != null && (
               <>
                 {' · '}
-                <span {...termProps('心率-功率解耦')}>心率-功率解耦 {data.decoupling}%</span>
+                <Term label="心率-功率解耦">心率-功率解耦 {data.decoupling}%</Term>
               </>
             )}
           </p>
@@ -221,12 +257,12 @@ export function Detail({ id, onBack }: { id: string; onBack: () => void }) {
             <div className="v">{kmh(a.averageSpeed)}</div>
           </div>
           <div className="item">
-            <div className="k"><span {...termProps('爬升')}>爬升</span></div>
+            <div className="k"><Term label="爬升" /></div>
             <div className="v">{mNum(a.totalElevationGain)}</div>
           </div>
           {a.averageHeartrate && (
             <div className="item">
-              <div className="k"><span {...termProps('平均心率')}>平均心率</span></div>
+              <div className="k"><Term label="平均心率" /></div>
               <div className="v">{Math.round(a.averageHeartrate)} bpm</div>
             </div>
           )}
@@ -238,7 +274,7 @@ export function Detail({ id, onBack }: { id: string; onBack: () => void }) {
           )}
           {a.weightedAverageWatts && (
             <div className="item">
-              <div className="k"><span {...termProps('NP（标准化功率）')}>NP（标准化功率）</span></div>
+              <div className="k"><Term label="NP（标准化功率）" /></div>
               <div className="v">{Math.round(a.weightedAverageWatts)} W</div>
             </div>
           )}
@@ -250,7 +286,7 @@ export function Detail({ id, onBack }: { id: string; onBack: () => void }) {
           )}
           {a.averageCadence && (
             <div className="item">
-              <div className="k"><span {...termProps('平均踏频')}>平均踏频</span></div>
+              <div className="k"><Term label="平均踏频" /></div>
               <div className="v">{Math.round(a.averageCadence)}</div>
             </div>
           )}
@@ -262,19 +298,19 @@ export function Detail({ id, onBack }: { id: string; onBack: () => void }) {
           )}
           {data.tss != null && (
             <div className="item">
-              <div className="k"><span {...termProps(`TSS（${TSS_METHOD_LABEL[data.tssMethod ?? ''] ?? data.tssMethod}）`)}>TSS（{TSS_METHOD_LABEL[data.tssMethod ?? ''] ?? data.tssMethod}）</span></div>
+              <div className="k"><Term label={`TSS（${TSS_METHOD_LABEL[data.tssMethod ?? ''] ?? data.tssMethod}）`} /></div>
               <div className="v">{data.tss}</div>
             </div>
           )}
           {data.intensityFactor != null && (
             <div className="item">
-              <div className="k"><span {...termProps('强度系数 IF')}>强度系数 IF</span></div>
+              <div className="k"><Term label="强度系数 IF" /></div>
               <div className="v">{data.intensityFactor.toFixed(2)}</div>
             </div>
           )}
           {data.np && settings?.weightKg && (
             <div className="item">
-              <div className="k"><span {...termProps('NP 功体比')}>NP 功体比</span></div>
+              <div className="k"><Term label="NP 功体比" /></div>
               <div className="v">{(data.np / settings.weightKg).toFixed(2)} W/kg</div>
             </div>
           )}
@@ -324,7 +360,7 @@ export function Detail({ id, onBack }: { id: string; onBack: () => void }) {
               {data.review.stats.map((s) => (
                 <div key={s.label} className="review-stat">
                   <div className="k">
-                    <span {...termProps(s.label)}>{s.label}</span>
+                    <Term label={s.label} />
                   </div>
                   <div className="v">{s.value}</div>
                 </div>
@@ -376,7 +412,7 @@ export function Detail({ id, onBack }: { id: string; onBack: () => void }) {
           <h3>数据曲线（鼠标悬停可在地图上联动定位）</h3>
           <Chart
             option={detailOption}
-            height={sections.length * 122 + 70}
+            height={activeSections.length * 122 + 70}
             onReady={(chart) => {
               chart.on('updateAxisPointer', (e: any) => {
                 const info = e?.axesInfo?.find((x: any) => x.axisDim === 'x')
@@ -397,10 +433,18 @@ export function Detail({ id, onBack }: { id: string; onBack: () => void }) {
             <Chart option={curveOption} height={260} />
           </div>
         )}
-        {zoneOption && (
+        {hrZoneOption && (
           <div className="card">
-            <h3>区间时间分布</h3>
-            <Chart option={zoneOption} height={260} />
+            <h3>
+              <Term label="心率区间">心率区间</Term>时间分布
+            </h3>
+            <Chart option={hrZoneOption} height={200} />
+          </div>
+        )}
+        {powerZoneOption && (
+          <div className="card">
+            <h3>功率区间时间分布</h3>
+            <Chart option={powerZoneOption} height={260} />
           </div>
         )}
       </div>

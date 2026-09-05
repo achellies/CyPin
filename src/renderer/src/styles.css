@@ -663,12 +663,41 @@ label.field span {
   line-height: 1.7;
 }
 
-/* 专业术语白话解释（虚线下划线 + hover） */
+/* 专业术语白话解释（虚线下划线 + hover/聚焦弹出气泡，portal 渲染到 body） */
 .term-tip {
   cursor: help;
   text-decoration: underline dotted rgba(154, 164, 176, 0.7);
   text-underline-offset: 3px;
+  outline: none;
 }
+
+.term-pop {
+  position: fixed;
+  z-index: 9999;
+  max-width: 300px;
+  display: grid;
+  gap: 4px;
+  background: #1c232d;
+  color: #dbe2ea;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+
+.term-pop b {
+  color: #fff;
+  font-size: 12.5px;
+}
+
+.term-pop span {
+  color: #aab4c0;
+  font-weight: 400;
+}
+
 
 
 /* ---------- dashboard sync banner ---------- */

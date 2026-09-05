@@ -61,6 +61,7 @@ export class AdviceEngine {
       return d.toISOString().slice(0, 10)
     }
     type WeekAudit = { long: number; intensity: number; recovery: number; endScores: number[]; longMin: number[] }
+    const lowEndRides: { date: string; name: string; score: number; reason: string }[] = []
     const auditByWeek = new Map<string, WeekAudit>()
     for (const a of all) {
       if (new Date(a.startDate).getTime() < Date.now() - 28 * 86400_000) continue
@@ -70,7 +71,17 @@ export class AdviceEngine {
       if (course.type === 'endurance' || a.movingTime >= 5400) {
         w.long++
         w.longMin.push(a.movingTime / 60)
-        if (course.type === 'endurance' && course.score != null) w.endScores.push(course.score)
+        if (course.type === 'endurance' && course.score != null) {
+          w.endScores.push(course.score)
+          if (course.score < 70) {
+            lowEndRides.push({
+              date: a.startDate.slice(5, 10),
+              name: a.name,
+              score: course.score,
+              reason: course.scoreReasons[0] ?? '有氧区间纯净度不足'
+            })
+          }
+        }
       }
       if (course.type === 'intervals' || course.type === 'tempo') w.intensity++
       if (course.type === 'recovery') w.recovery++
@@ -269,13 +280,21 @@ export class AdviceEngine {
       })
     } else if (audit.longPerWeek >= 1) {
       // 长骑已经规律——不再建议「加入长骑」，转向质量与进阶
-      const scoreTxt = audit.enduranceScoreAvg != null ? `，执行质量平均 ${Math.round(audit.enduranceScoreAvg)} 分` : ''
+      const nEnd = audits.flatMap((w) => w.endScores).length
+      const scoreTxt =
+        audit.enduranceScoreAvg != null
+          ? `，近 4 周 ${nEnd} 节有氧耐力课执行质量平均 ${Math.round(audit.enduranceScoreAvg)} 分（按 Z1-Z2 区间纯净度评分，不是骑得快慢）`
+          : ''
       if (audit.enduranceScoreAvg != null && audit.enduranceScoreAvg < 70) {
+        const worst = lowEndRides.sort((x, y) => x.score - y.score).slice(0, 2)
+        const worstTxt = worst.length
+          ? `拉低平均的主要是：${worst.map((r) => `${r.date}「${r.name}」${r.score} 分（${r.reason}）`).join('；')}。其余耐力课执行都不错。`
+          : '常见问题是前半程骑过头或频繁拉爆式加速，把有氧课骑成了混氧课，刺激变浅、恢复变慢。'
         out.push({
           level: 'warn',
           category: '长骑质量',
-          title: `长骑频率已达标（近 4 周 ${audit.totalLong} 次 90min+），但执行质量偏低（${Math.round(audit.enduranceScoreAvg)} 分）`,
-          detail: `你的长骑量足够${scoreTxt}。常见问题是前半程骑过头或频繁拉爆式加速，把有氧课骑成了混氧课，刺激变浅、恢复变慢。`,
+          title: `长骑频率已达标（近 4 周 ${audit.totalLong} 次 90min+），但有氧课纯净度被稀释（平均 ${Math.round(audit.enduranceScoreAvg)} 分）`,
+          detail: `你的长骑量足够${scoreTxt}。${worstTxt}`,
           action: '下一次长骑把心率锁在「能完整说句子」的区间，前半程刻意比感觉再慢 5%；质量分上 80 后再考虑加量。'
         })
       } else {

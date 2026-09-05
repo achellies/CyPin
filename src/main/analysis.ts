@@ -14,6 +14,13 @@ import type {
 import { join } from 'path'
 import { readFileSync, writeFileSync, existsSync } from 'fs'
 
+/** 可信时间下限：早于 2001-01-01 的时间戳视为设备时钟错误（epoch 脏数据），不参与按日期的聚合与展示 */
+const MIN_PLAUSIBLE_TS = Date.UTC(2001, 0, 1)
+function plausibleDate(iso: string): boolean {
+  const t = new Date(iso).getTime()
+  return Number.isFinite(t) && t >= MIN_PLAUSIBLE_TS
+}
+
 const POWER_ZONE_BOUNDS = [0.55, 0.75, 0.9, 1.05, 1.2, 1.5]
 const POWER_ZONE_LABELS = ['Z1 恢复', 'Z2 耐力', 'Z3 节奏', 'Z4 阈值', 'Z5 VO2', 'Z6 无氧', 'Z7 极限']
 const HR_ZONE_LABELS = ['Z1 恢复', 'Z2 耐力', 'Z3 节奏', 'Z4 阈值', 'Z5 极限']
@@ -314,10 +321,12 @@ export class AnalysisEngine {
   computeTimeInZones(a: Activity, streams: Streams | null) {
     const out: { label: string; seconds: number; power?: boolean; hr?: boolean }[] = []
     const ftp = this.store.getFtp()
+    // 功率区间与心率区间并列输出（有哪种就给哪种），不再二选一
     if (streams?.watts?.length && ftp && a.deviceWatts) {
       const zones = this.powerZoneSeconds(streams.watts, ftp)
       zones.forEach((sec, i) => out.push({ label: POWER_ZONE_LABELS[i], seconds: sec, power: true }))
-    } else if (streams?.heartrate?.length) {
+    }
+    if (streams?.heartrate?.length) {
       const zones = this.timeInHrZones(streams)
       zones.forEach((sec, i) => out.push({ label: HR_ZONE_LABELS[i], seconds: sec, hr: true }))
     }
@@ -404,12 +413,14 @@ export class AnalysisEngine {
     return blocks
   }
 
-  /** 课型识别 + 执行质量分（结果按活动持久化缓存） */
+  /** 课型识别 + 执行质量分（结果按活动持久化缓存；ALGO 变更后旧缓存自动失效） */
+  private static COURSE_ALGO = 2
+
   classifyRide(a: Activity, streams: Streams | null): RideCourse {
     const key = a.id + ':course'
     const ftp = this.store.getFtp()
-    const c = this.metrics[key] as unknown as { v: number; ftp: number; course: RideCourse } | undefined
-    if (c && c.v === this.store.version && c.ftp === (ftp ?? 0)) return c.course
+    const c = this.metrics[key] as unknown as { v: number; ftp: number; algo: number; course: RideCourse } | undefined
+    if (c && c.v === this.store.version && c.ftp === (ftp ?? 0) && c.algo === AnalysisEngine.COURSE_ALGO) return c.course
 
     const hours = a.movingTime / 3600
     const if_ = ftp && a.deviceWatts && a.weightedAverageWatts ? a.weightedAverageWatts / ftp : null
@@ -443,16 +454,19 @@ export class AnalysisEngine {
     const noZone = z1z2Share === 0 && z3Share === 0 && hardShare === 0
     const hardBlocks = noZone ? 0 : this.countHardBlocks(a, streams, powerBased)
 
-    // 分类
+    // 分类：先看强度结构（间歇/节奏），再看低强度课的时长语义。
+    // 注意：IF≤0.7 不能直接判恢复骑——长距离低强度骑（IF 0.55-0.7、Z1Z2 占比高）是标准有氧耐力课，
+    // 如 MyWhoosh Zone 2 Steady（1.5h+ 纯 Z2、IF 0.6）；恢复骑应是「短 + 低强度 + 无高强度块」
     let type: CourseType
     if (noZone) type = hours >= 1.5 ? 'endurance' : 'easy'
     else if (hours < 0.33) type = 'easy'
-    else if (if_ != null && if_ <= 0.7) type = 'recovery'
     else if (hardShare >= 0.22 && hardBlocks >= 3) type = 'intervals'
     else if (hardShare >= 0.3) type = 'tempo'
-    else if (z1z2Share >= 0.6 && hours >= 1.25) type = 'endurance'
     else if (z3Share >= 0.35) type = 'tempo'
-    else if (z1z2Share >= 0.55 && hours >= 0.75) type = 'endurance'
+    else if (if_ != null && if_ <= 0.7 && hours < 1.0 && hardShare < 0.08) type = 'recovery'
+    else if (z1z2Share >= 0.6 && hours >= 1.25) type = 'endurance'
+    else if (z1z2Share >= 0.8 && hours >= 0.75) type = 'endurance'
+    else if (if_ != null && if_ <= 0.65 && hardShare < 0.08) type = 'recovery'
     else type = 'easy'
 
     const LABEL: Record<CourseType, string> = {
@@ -544,7 +558,12 @@ export class AnalysisEngine {
       scoreReasons: reasons,
       metrics: { z1z2Share, z3Share, hardShare, hardBlocks, if_, hours }
     }
-    ;(this.metrics as Record<string, unknown>)[key] = { v: this.store.version, ftp: ftp ?? 0, course }
+    ;(this.metrics as Record<string, unknown>)[key] = {
+      v: this.store.version,
+      ftp: ftp ?? 0,
+      algo: AnalysisEngine.COURSE_ALGO,
+      course
+    }
     return course
   }
 
@@ -700,6 +719,7 @@ export class AnalysisEngine {
     const monthly = new Map<string, { distance: number; time: number; elevation: number; tss: number; count: number }>()
 
     for (const a of all) {
+      if (!plausibleDate(a.startDate)) continue
       const d = new Date(a.startDate)
       const wk = weekStart(d)
       const mh = a.startDate.slice(0, 7)
@@ -722,7 +742,7 @@ export class AnalysisEngine {
     this.persistMetrics()
 
     const speedTrend = all
-      .filter((a) => a.distance > 5000)
+      .filter((a) => a.distance > 5000 && plausibleDate(a.startDate))
       .slice(0, 60)
       .reverse()
       .map((a) => ({ date: a.startDate.slice(0, 10), avgSpeed: Math.round(a.averageSpeed * 3.6 * 10) / 10, activity: a.name }))
@@ -860,6 +880,7 @@ export class AnalysisEngine {
     const hrByMonth = new Map<string, number[]>()
     const cadByMonth = new Map<string, { sum: number; t: number; n: number }>()
     for (const a of all) {
+      if (!plausibleDate(a.startDate)) continue
       const mh = a.startDate.slice(0, 7)
       if (a.type === 'Ride' && !a.trainer && a.averageHeartrate && a.averageHeartrate >= 100 && a.movingTime >= 2700 && a.movingTime <= 9000) {
         const arr = hrByMonth.get(mh) ?? []
@@ -875,6 +896,22 @@ export class AnalysisEngine {
       }
     }
     const monthKeys = [...new Set([...hrByMonth.keys(), ...cadByMonth.keys()])].sort().slice(-12)
+
+    // ---------- 月度心率区间结构：Z1-Z5 累计秒数（走持久化缓存） ----------
+    const hrZoneByMonth = new Map<string, number[]>()
+    for (const a of all) {
+      if (!plausibleDate(a.startDate) || !a.hasHeartrate || a.movingTime < 900) continue
+      const z = this.hrZoneSecondsCached(a)
+      if (!z) continue
+      const mh = a.startDate.slice(0, 7)
+      const acc = hrZoneByMonth.get(mh) ?? new Array(5).fill(0)
+      for (let i = 0; i < 5; i++) acc[i] += z[i]
+      hrZoneByMonth.set(mh, acc)
+    }
+    const hrZoneTrend = [...hrZoneByMonth.entries()]
+      .sort()
+      .slice(-12)
+      .map(([month, zones]) => ({ month, zones }))
     const hrTrend = monthKeys
       .map((m) => {
         const arr = hrByMonth.get(m)
@@ -894,6 +931,7 @@ export class AnalysisEngine {
       speedTrend,
       hrTrend,
       cadenceTrend,
+      hrZoneTrend,
       training: { weeks: trainingWeeks, insights }
     }
   }
@@ -992,7 +1030,7 @@ export class AnalysisEngine {
       { sec: 1200, label: '20 分钟' }
     ]
     const withPowerAsc = all
-      .filter((a) => a.deviceWatts)
+      .filter((a) => a.deviceWatts && plausibleDate(a.startDate))
       .sort((x, y) => new Date(x.startDate).getTime() - new Date(y.startDate).getTime())
     const prTimeline = prWindows.map((w) => {
       const events: { date: string; watts: number }[] = []
@@ -1012,6 +1050,7 @@ export class AnalysisEngine {
     // ---- 爬坡段检测（有海拔流的骑行） ----
     const climbs: AbilityData['climbs'] = []
     for (const a of all) {
+      if (!plausibleDate(a.startDate)) continue
       const s = this.store.getStreams(a.id)
       if (!s?.altitude?.length) continue
       for (const c of this.detectClimbs(a, s)) climbs.push(c)
@@ -1022,6 +1061,7 @@ export class AnalysisEngine {
     // ---- 有氧效率趋势（稳态骑：解耦 + EF） ----
     const aerobicTrend: AbilityData['aerobicTrend'] = []
     for (const a of all) {
+      if (!plausibleDate(a.startDate)) continue
       if (a.movingTime < 2700) continue
       if (a.weightedAverageWatts && a.averageWatts && a.weightedAverageWatts / a.averageWatts > 1.12) continue
       const s = this.store.getStreams(a.id)
@@ -1208,39 +1248,37 @@ export class AnalysisEngine {
       const dh = sm[i] - sm[i - W]
       if (dh / delta(i - W, i) >= 0.028) climbing[i] = 1
     }
-    // 合并成段（间隔 < 30 采样视为同一段）
+    // 合并成段：先填补 30 采样内的短暂中断（防止同一段爬坡被拆成两段重叠区间），再提取连续段
+    const filled = new Uint8Array(climbing)
+    for (let i = 1; i < n - 1; i++) {
+      if (!filled[i]) {
+        let j = i
+        while (j < n && !filled[j]) j++
+        if (j - i <= 30 && j < n) for (let k = i; k < j; k++) filled[k] = 1
+        i = j
+      }
+    }
     const runs: [number, number][] = []
     let start = -1
     for (let i = 1; i < n; i++) {
-      if (climbing[i] && start < 0) start = i
-      else if (!climbing[i] && start >= 0) {
-        let end = i
-        // 允许向后吞并 30 个采样内的短暂中断
-        let gap = 0
-        for (let j = i; j < Math.min(n, i + 30); j++) {
-          if (climbing[j]) {
-            end = j + 1
-            gap = 0
-          } else gap++
-          if (gap >= 30) break
-        }
-        if (end - start >= 60) runs.push([start, end])
+      if (filled[i] && start < 0) start = i
+      else if (!filled[i] && start >= 0) {
+        if (i - start >= 60) runs.push([start, i])
         start = -1
       }
     }
     if (start >= 0 && n - start >= 60) runs.push([start, n])
     const out: AbilityData['climbs'] = []
-    for (const [i0, i1] of runs) {
-      const distanceM = dist ? dist[i1 - 1] - dist[i0] : 0
-      let gain = 0
+    for (const [m0, m1] of runs) {
+      // 梯度窗口滞后 W 采样：起点向前扩展 W 补回坡脚；爬升取净海拔差（与码表/Strava 口径一致）
+      const i0 = Math.max(0, m0 - W)
+      const i1 = Math.min(n - 1, m1)
+      const distanceM = dist ? dist[i1] - dist[i0] : 0
+      const gain = Math.max(sm[i1] - sm[i0], 0)
       let maxGradient = 0
-      for (let i = i0 + 1; i < i1; i++) {
-        const d = sm[i] - sm[i - 1]
-        if (d > 0) gain += d
-        if (i - i0 >= W) {
-          const g = (sm[i] - sm[i - W]) / delta(i - W, i)
-          if (g > maxGradient) maxGradient = g
-        }
+      for (let i = i0 + W; i <= i1; i++) {
+        const g = (sm[i] - sm[i - W]) / delta(i - W, i)
+        if (g > maxGradient) maxGradient = g
       }
       if (gain < 20 || distanceM < 400) continue
       const avgGradient = gain / distanceM
@@ -1255,7 +1293,7 @@ export class AnalysisEngine {
           }
         }
       }
-      const duration = time[i1 - 1] - time[i0]
+      const duration = time[i1] - time[i0]
       out.push({
         date: a.startDate.slice(0, 10),
         activityId: a.id,

@@ -231,6 +231,8 @@ export interface TrendsData {
   hrTrend: { month: string; hr: number; n: number }[]
   /** 踏频趋势：每月平均踏频（按时长加权） */
   cadenceTrend: { month: string; cadence: number; n: number }[]
+  /** 月度心率区间结构：Z1-Z5 累计秒数（仅有心率数据的活动） */
+  hrZoneTrend: { month: string; zones: number[] }[]
   /** 训练结构分析（替代月度 FTP 曲线） */
   training: {
     weeks: WeekTraining[]

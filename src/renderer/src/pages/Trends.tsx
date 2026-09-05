@@ -223,6 +223,29 @@ export function Trends({ version }: { version: number }) {
     ]
   }
 
+  // ---------- 月度心率区间结构：Z1-Z5 堆叠 ----------
+  const HR_ZONES = ['Z1 恢复', 'Z2 耐力', 'Z3 节奏', 'Z4 阈值', 'Z5 极限']
+  const HR_ZONE_COLORS = ['#4d9fff', '#4caf7d', '#f0b429', '#e5484d', '#a855f7']
+  const hrZoneTrendOption: EChartsOption = {
+    tooltip: {
+      trigger: 'axis',
+      formatter: (ps: any) =>
+        `${ps[0].axisValue}<br/>` + ps.map((p: any) => `${p.marker}${p.seriesName} ${p.value}h`).join('<br/>')
+    },
+    legend: { data: HR_ZONES, textStyle: { color: '#9aa4b0' }, top: 0 },
+    grid: { left: 48, right: 24, top: 32, bottom: 32 },
+    xAxis: { type: 'category', data: data.hrZoneTrend.map((h) => h.month), axisLabel: { color: '#9aa4b0' } },
+    yAxis: { type: 'value', name: '小时', axisLabel: { color: '#9aa4b0' }, splitLine: { lineStyle: { color: '#222932' } } },
+    series: HR_ZONES.map((name, i) => ({
+      name,
+      type: 'bar' as const,
+      stack: 'hr',
+      barMaxWidth: 26,
+      data: data.hrZoneTrend.map((h) => Math.round((h.zones[i] ?? 0) / 360) / 10),
+      itemStyle: { color: HR_ZONE_COLORS[i] }
+    }))
+  }
+
   const totalDistance = data.monthly.reduce((s, m) => s + m.distance, 0)
   const totalTime = data.monthly.reduce((s, m) => s + m.time, 0)
   const totalElevation = data.monthly.reduce((s, m) => s + m.elevation, 0)
@@ -275,6 +298,16 @@ export function Trends({ version }: { version: number }) {
               <p className="hint">90+ rpm 为高效区间；长期低于 75 rpm 说明依赖大齿比踩踏，肌肉负担更重。</p>
             </div>
           )}
+        </div>
+      )}
+
+      {data.hrZoneTrend.length >= 2 && (
+        <div className="card">
+          <h3>月度心率区间结构（近 12 个月）</h3>
+          <Chart option={hrZoneTrendOption} height={280} />
+          <p className="hint">
+            有氧基础看 Z1-Z2（蓝+绿）是否稳定占大头；Z4+（红+紫）突增提示强度课加量过快。按乳酸阈心率分档，仅统计有心率数据的活动。
+          </p>
         </div>
       )}
 
